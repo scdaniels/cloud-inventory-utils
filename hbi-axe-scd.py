@@ -26,6 +26,8 @@ from optparse import OptionParser
 from time import sleep
 from datetime import datetime, timedelta
 import requests
+from operator import itemgetter
+
 
 systemdata = []
 duplicate_list = []
@@ -41,6 +43,22 @@ HYPERVISOR_LIST_LOG = "/tmp/hbi_hypervisor_with_guest_list.csv"
 DELETED_ENTRIES_LOG = "/tmp/hbi_deleted_entries.csv"
 
 
+def reset_data():
+    """
+    Drop all data from the data structures.  This is needed if data is ever reloaded
+    """
+
+    global systemdata, duplicate_list, diff_display_name_fqdn_list, last_seen_list, hyper_list, deleted_entries_list
+
+    systemdata.clear()
+    duplicate_list.clear()
+    diff_display_name_fqdn_list.clear()
+    last_seen_list.clear()
+    hyper_list.clear()
+    deleted_entries_list.clear()
+
+
+
 def process_info(login, password, server):
     """
     Function responsible for collect and process the main info regarding
@@ -49,7 +67,11 @@ def process_info(login, password, server):
 
     global systemdata
 
-    systemdata = []
+    # Clean up data structure if data was previously loaded
+    #
+    if (len(systemdata) > 0):
+        reset_data()
+
     url = 'https://' + server + '/api/inventory/v1/hosts'
     result = requests.get(url, auth=(login, password)).content
     jsonresult = json.loads(result)
@@ -74,6 +96,28 @@ def process_info(login, password, server):
     input("press any key to continue")
 
 
+def get_socket_count(id):
+    """
+    This function will lookup the number of sockets that the hypervisor has installed as stored in the cloud inventory.
+    If the # of sockets cannot be determined the value of -1 will be returned.
+    """
+    url = 'https://' + server + '/api/inventory/v1/hosts/' + id + '/system_profile'
+
+    result = requests.get(url, auth=(login, password)).content
+    jsonresult = json.loads(result)
+
+    try:
+        real_number_of_sockets = jsonresult['results'][0]['system_profile']['number_of_sockets']
+        if ((real_number_of_sockets % 2) != 0):
+            number_of_sockets = real_number_of_sockets + 1
+        else:
+            number_of_sockets = real_number_of_sockets
+    except KeyError:
+        number_of_sockets = -1
+
+    return number_of_sockets
+
+
 def hypervisor_guests():
     """
     Function responsible to identify all the hypervisors "virt-who-" and then
@@ -82,10 +126,16 @@ def hypervisor_guests():
     """
 
     global hyper_list
-    hyper_list_local = []
-    local_temp_list = []
+    virtWhoFields = []
+    progressBars = "-\|/"
 
-    print("Please, this process can spend some time once we are checking all the hypervisors")
+    # print("Please, this process can spend some time once we are checking all the hypervisors")
+
+    systemIndex = 0
+    virtwhoCount = 0
+    guestCount = 0
+
+    print("Searching for virt-who hosts - please be patient. . .")
     for ch in systemdata:
         if 'virt-who-' in ch['display_name']:
             display_name = ch['display_name']
@@ -100,52 +150,33 @@ def hypervisor_guests():
 
             num_of_guests = len(jsonresult['data'])
 
-            if (num_of_guests != 0):
-                local_temp_list.append(id)
-                local_temp_list.append(display_name)
-                local_temp_list.append(num_of_guests)
-                local_temp_list.append(last_seen)
+            if (num_of_guests > 0):
+                virtWhoFields.append(id)
+                virtWhoFields.append(display_name)
+                virtWhoFields.append(num_of_guests)
+                virtWhoFields.append()  # Set the guest count to -2 to start.  Bulk lookup will happen later
+                virtWhoFields.append(last_seen)
 
-                hyper_list_local.append(local_temp_list)
-                local_temp_list = []
+                hyper_list.append(virtWhoFields)
+                virtWhoFields = []
 
-    for b in hyper_list_local:
-        id = b[0]
-        display_name = b[1]
-        num_of_guests = b[2]
-        last_seen = b[3]
+                guestCount += num_of_guests
 
-        url = 'https://' + server + '/api/inventory/v1/hosts/' + id + '/system_profile'
+                print("\r%c %d virt-who hosts with %d guests" % (progressBars[virtwhoCount % 4], virtwhoCount+1, guestCount), end="")
+                virtwhoCount += 1
 
-        result = requests.get(url, auth=(login, password)).content
-        jsonresult = json.loads(result)
-
-        try:
-            real_number_of_sockets = jsonresult['results'][0]['system_profile']['number_of_sockets']
-            if ((real_number_of_sockets % 2) != 0):
-                number_of_sockets = real_number_of_sockets + 1
-            else:
-                number_of_sockets = real_number_of_sockets
-        except KeyError:
-            number_of_sockets = "no number of sockets key"
-
-        local_temp_list.append(id)
-        local_temp_list.append(display_name)
-        local_temp_list.append(num_of_guests)
-        local_temp_list.append(number_of_sockets)
-        local_temp_list.append(last_seen)
-        hyper_list.append(local_temp_list)
-        local_temp_list = []
+        systemIndex += 1
+    print()
 
     with open(HYPERVISOR_LIST_LOG, "w") as file_obj:
         file_obj.write("id,display_name,number_of_guests,number_of_sockets,last_seen\n")
 
-        for b in hyper_list:
-            id = b[0]
-            display_name = b[1]
-            number_of_guests = b[2]
-            number_of_sockets = b[3]
-            last_seen = b[4]
+        for l in hyper_list:
+            id                  = l[0]
+            display_name        = l[1]
+            number_of_guests    = l[2]
+            number_of_sockets   = l[3]
+            last_seen           = l[4]
 
             file_obj.write(str(id) + "," + str(display_name) + "," + str(number_of_guests) + "," + str(number_of_sockets) + "," + str(last_seen) + "\n")
 
@@ -153,7 +184,7 @@ def hypervisor_guests():
     print("Were found {} entries on your environment.".format(len(hyper_list)))
     input("press any key to see the content of the file")
     system("less " + HYPERVISOR_LIST_LOG)
-    input("press any key to continue")
+    #input("press any key to continue")
 
 
 def list_duplicated_entries():
@@ -382,7 +413,7 @@ def main_menu():
         if (len(systemdata) == 0):
             status = "Not loaded yet"
         else:
-            status = "Ready to go"
+            status = "Ready to go (" + str(len(systemdata)) + " records loaded)"
 
         system("clear")
         print("############################################################")
