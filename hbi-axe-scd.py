@@ -34,6 +34,7 @@ duplicate_list = []
 diff_display_name_fqdn_list = []
 last_seen_list = []
 hyper_list = []
+hyper_dict = {}
 deleted_entries_list = []
 
 DUPLICATE_ENTRIES_LOG = "/tmp/hbi_duplicate_entries.csv"
@@ -59,7 +60,7 @@ def reset_data():
 
 
 
-def process_info(login, password, server):
+def read_inventory(login, password, server):
     """
     Function responsible for collect and process the main info regarding
     to the Content Hosts on cloud.redhat.com
@@ -96,6 +97,31 @@ def process_info(login, password, server):
     input("press any key to continue")
 
 
+def batch_socket_lookup(idList):
+    """
+    This function will lookup the number of sockets that the hypervisor has installed as stored in the cloud inventory.
+    If the # of sockets cannot be determined the value of -1 will be returned.
+    """
+
+    url = 'https://' + server + '/api/inventory/v1/hosts/' + ",".join(idList) + '/system_profile'
+    print(url)
+
+    result = requests.get(url, auth=(login, password)).content
+    jsonresult = json.loads(result)
+    print(jsonresult)
+    return
+
+    try:
+        real_number_of_sockets = jsonresult['results'][0]['system_profile']['number_of_sockets']
+        if ((real_number_of_sockets % 2) != 0):
+            number_of_sockets = real_number_of_sockets + 1
+        else:
+            number_of_sockets = real_number_of_sockets
+    except KeyError:
+        number_of_sockets = -1
+
+    return number_of_sockets
+
 def get_socket_count(id):
     """
     This function will lookup the number of sockets that the hypervisor has installed as stored in the cloud inventory.
@@ -125,8 +151,9 @@ def hypervisor_guests():
     which Content Host is running on top of which hypervisor.
     """
 
-    global hyper_list
+    global hyper_list, hyper_dict
     virtWhoFields = []
+    hyperIDList = []
     progressBars = "-\|/"
 
     # print("Please, this process can spend some time once we are checking all the hypervisors")
@@ -154,11 +181,18 @@ def hypervisor_guests():
                 virtWhoFields.append(id)
                 virtWhoFields.append(display_name)
                 virtWhoFields.append(num_of_guests)
-                virtWhoFields.append()  # Set the guest count to -2 to start.  Bulk lookup will happen later
+                # virtWhoFields.append(get_socket_count(id))  # Set the guest count to -2 to start.  Bulk lookup will happen later
+                virtWhoFields.append(-2)  # Set the guest count to -2 to start.  Bulk lookup will happen later
                 virtWhoFields.append(last_seen)
 
                 hyper_list.append(virtWhoFields)
+                hyper_dict[id] = virtWhoFields
                 virtWhoFields = []
+
+                hyperIDList.append(id)
+                if (len(hyperIDList) % 50 == 0):
+                    batch_socket_lookup(hyperIDList)
+                    hyperIDList = []
 
                 guestCount += num_of_guests
 
@@ -435,7 +469,7 @@ def main_menu():
         opc = input()
 
         if (opc == "1"):
-            process_info(login, password, server)
+            read_inventory(login, password, server)
         elif (opc == "2"):
             list_duplicated_entries()
         elif (opc == "3"):
